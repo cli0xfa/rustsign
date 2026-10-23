@@ -1,0 +1,25 @@
+.claude/
+CLAUDE.md
+AGENTS.md
+/target
+/target_rebuild
+node_modules
+dist
+build
+*.exe
+*.dll
+*.sys
+*.pdb
+*.tsbuildinfo
+
+# Test fixtures are required by CI.
+!/test_data/
+!/test_data/**
+.DS_Store
+.env
+*.local
+/src-tauri/gen
+demo/
+/artifacts/
+/playwright-report/
+/test-results/

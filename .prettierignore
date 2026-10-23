@@ -1,0 +1,10 @@
+dist
+build
+node_modules
+src-tauri
+package-lock.json
+Cargo.lock
+*.pem
+*.cer
+*.pdb
+*.exe

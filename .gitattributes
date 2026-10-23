@@ -1,0 +1,16 @@
+# Normalize all text files to LF in the repository and on checkout.
+# Keeps Prettier (`endOfLine: lf`), rustfmt and tsc consistent across
+# Windows and POSIX runners regardless of each user's core.autocrlf setting.
+* text=auto eol=lf
+
+# Binary assets — never normalize.
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.sys binary
+*.pdb binary
+*.pem binary
+*.cer binary
+*.pfx binary
+*.p12 binary

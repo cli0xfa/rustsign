@@ -1,0 +1,7 @@
+# Rust formatting configuration.
+#
+# Locks the style enforced by `cargo fmt --check` in CI. The values mirror
+# rustfmt's defaults; only the edition is set explicitly so formatting matches
+# the crate regardless of the toolchain's default edition.
+edition = "2024"
+max_width = 100

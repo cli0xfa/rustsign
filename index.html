@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RustSign</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --background: 220 20% 97%;
+        --foreground: 220 22% 13%;
+        --muted-foreground: 220 10% 40%;
+        --primary: 221 74% 42%;
+        --motion-fast: 120ms;
+        --motion-standard: 180ms;
+        --motion-exit: 140ms;
+        --motion-ease-out: cubic-bezier(0.25, 1, 0.5, 1);
+        --motion-ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+      }
+      :root.dark {
+        color-scheme: dark;
+        --background: 222 16% 10%;
+        --foreground: 216 18% 92%;
+        --muted-foreground: 218 10% 68%;
+        --primary: 216 84% 73%;
+      }
+      html,
+      body,
+      #root {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        background: hsl(var(--background));
+        color: hsl(var(--foreground));
+      }
+      #app-boot {
+        position: fixed;
+        inset: 0;
+        z-index: 1000;
+        pointer-events: none;
+        background: hsl(var(--background));
+        opacity: 1;
+        visibility: visible;
+      }
+      #app-boot[data-dismissed='true'] {
+        display: none;
+        opacity: 0;
+        visibility: hidden;
+      }
+      #startup-state {
+        display: grid;
+        align-content: center;
+        justify-items: center;
+        gap: 8px;
+        height: 100%;
+        font:
+          14px/1.5 'Segoe UI Variable',
+          'Microsoft YaHei UI',
+          'Segoe UI',
+          sans-serif;
+        color: hsl(var(--muted-foreground));
+      }
+      #startup-state svg {
+        width: 32px;
+        height: 32px;
+        color: hsl(var(--primary));
+      }
+      #startup-state strong {
+        color: hsl(var(--foreground));
+        font-size: 15px;
+        font-weight: 600;
+      }
+      #startup-state small {
+        font-size: 12px;
+      }
+      @keyframes startup-enter {
+        from {
+          opacity: 0;
+        }
+        to {
+          opacity: 1;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #app-boot {
+          transition-duration: 0.01ms;
+          transition-delay: 0s;
+        }
+        #startup-state {
+          animation-duration: 0.01ms;
+        }
+      }
+    </style>
+    <script>
+      try {
+        const theme = localStorage.getItem('rustsign-theme');
+        document.documentElement.classList.toggle('dark', theme !== 'light');
+        if (localStorage.getItem('rustsign-language') === 'en') {
+          document.documentElement.lang = 'en';
+        }
+      } catch {
+        document.documentElement.classList.add('dark');
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app-boot">
+      <div id="startup-state" role="status" aria-live="polite">
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          aria-hidden="true"
+        >
+          <path d="M12 22s8-4 8-11V5l-8-3-8 3v6c0 7 8 11 8 11Z" />
+          <path d="m9 12 2 2 4-4" />
+        </svg>
+        <strong>RustSign</strong>
+        <small id="startup-label">正在加载工作台…</small>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script>
+      if (document.documentElement.lang === 'en') {
+        document.getElementById('startup-label').textContent = 'Loading workspace…';
+      }
+    </script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
