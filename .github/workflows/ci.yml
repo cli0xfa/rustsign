@@ -1,4 +1,4 @@
-name: CI
+name: CI and Release
 
 on:
   push:
@@ -7,6 +7,9 @@ on:
       - "v*"
   pull_request:
     branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   check:
@@ -55,3 +58,82 @@ jobs:
       - run: npm run test:rust
       - run: cargo clippy --package rustsign
       - run: cargo fmt --check
+
+  release:
+    name: Build & Publish Release
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $tauriVersion = (Get-Content src-tauri/tauri.conf.json -Raw | ConvertFrom-Json).version
+          $crateVersion = (Select-String -Path src-tauri/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"').Matches.Groups[1].Value
+          if ($tauriVersion -ne $crateVersion) {
+            throw "Tauri version ($tauriVersion) and Rust crate version ($crateVersion) must match."
+          }
+          $expectedTag = "v$tauriVersion"
+          if ($env:GITHUB_REF_NAME -ne $expectedTag) {
+            throw "Release tag $env:GITHUB_REF_NAME must match app version tag $expectedTag."
+          }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Rust cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2"
+
+      - name: Build Tauri app
+        run: cargo tauri build --bundles nsis
+
+      - name: Collect release artifacts
+        shell: pwsh
+        run: |
+          $artifactDirectory = Join-Path $PWD "artifacts"
+          New-Item -ItemType Directory -Force -Path $artifactDirectory | Out-Null
+
+          $application = "target/release/rustsign.exe"
+          if (!(Test-Path $application)) {
+            throw "Release executable was not produced: $application"
+          }
+          Copy-Item $application "$artifactDirectory/RustSign-$env:GITHUB_REF_NAME-windows-x86_64.exe"
+
+          $installers = @(Get-ChildItem "target/release/bundle/nsis" -Filter "*.exe" -File)
+          if ($installers.Count -eq 0) {
+            throw "No NSIS installer was produced."
+          }
+          $installers | Copy-Item -Destination $artifactDirectory
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustSign-${{ github.ref_name }}-windows-x86_64
+          path: artifacts/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: RustSign ${{ github.ref_name }}
+          generate_release_notes: true
+          files: artifacts/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -153,7 +153,9 @@ cargo tauri build         # 生成 NSIS 安装包
 ## CI/CD
 
 - **CI**：每次 push/PR 自动运行 TypeScript 类型检查、ESLint、Prettier 格式检查、Rust 测试、Clippy、rustfmt
-- **Release**：推送 `v*` 标签自动编译并发布 NSIS 安装包与可执行文件到 GitHub Release
+- **Release**：推送与 `src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 版本一致的 `v*` 标签；CI 全部通过后自动编译 NSIS 安装包及可执行文件，并生成 GitHub Release 和发布说明
+
+发布新版本时，先同步更新 `src-tauri/tauri.conf.json` 与 `src-tauri/Cargo.toml` 中的版本号，再创建并推送对应标签，例如 `v0.3.1`。版本号必须与标签完全一致。
 
 ## 更新日志
 
