@@ -179,6 +179,10 @@ Windows 安装包位于 `target/release/bundle/nsis/`。
 
 ## 更新日志
 
+### v0.3.2
+
+- 修复部分 PKCS#12/PFX 文件因省略 MAC 迭代次数字段而无法导入的问题，并保留原有 MAC 与密码校验
+
 ### v0.3.1
 
 - 时间戳及交叉证书的 HTTPS 客户端改用 rustls，保留系统信任根与代理设置，减少对平台原生 TLS 后端的依赖
