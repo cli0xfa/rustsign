@@ -69,22 +69,17 @@ test('drag hint, disclosures, and operation results use restrained state motion'
   await page.getByLabel('签名证书', { exact: true }).selectOption('test-identity');
   await page.getByRole('button', { name: '开始签名' }).click();
   await expect(page.getByText('签名未完成，请检查证书及签名参数。', { exact: true })).toBeVisible();
+  const resultAnimationCount = () =>
+    page.evaluate(
+      () =>
+        (window as Window & { __motionAnimations?: string[] }).__motionAnimations?.filter(
+          (name) => name === 'result-in',
+        ).length ?? 0,
+    );
+  await expect.poll(resultAnimationCount).toBeGreaterThanOrEqual(1);
   await page.getByRole('button', { name: '开始签名' }).click();
   await expect(page.getByText('签名已写入原文件', { exact: true })).toBeVisible();
-  await expect
-    .poll(() =>
-      page.evaluate(
-        () => (window as Window & { __motionAnimations?: string[] }).__motionAnimations ?? [],
-      ),
-    )
-    .toContain('result-in');
-  const resultAnimations = await page.evaluate(
-    () =>
-      (window as Window & { __motionAnimations?: string[] }).__motionAnimations?.filter(
-        (name) => name === 'result-in',
-      ).length ?? 0,
-  );
-  expect(resultAnimations).toBeGreaterThanOrEqual(2);
+  await expect.poll(resultAnimationCount).toBeGreaterThanOrEqual(2);
 });
 
 test('reduced motion removes travel and keeps immediate state feedback', async ({ page }) => {
@@ -208,9 +203,9 @@ test('keyboard signing, verification, tab navigation and destructive cancel', as
   await page.keyboard.press('Enter');
   const certificate = page.getByLabel('签名证书', { exact: true });
   await certificate.focus();
-  await page.keyboard.press('Space');
-  await page.keyboard.press('ArrowDown');
-  await page.keyboard.press('Enter');
+  await expect(certificate).toBeFocused();
+  // Native select popups commit keyboard choices differently across host OSes.
+  await certificate.selectOption('test-identity');
   await expect(certificate).toHaveValue('test-identity');
   await page.getByRole('button', { name: '开始签名' }).focus();
   await page.keyboard.press('Enter');
