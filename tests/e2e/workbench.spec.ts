@@ -208,7 +208,9 @@ test('keyboard signing, verification, tab navigation and destructive cancel', as
   await page.keyboard.press('Enter');
   const certificate = page.getByLabel('签名证书', { exact: true });
   await certificate.focus();
+  await page.keyboard.press('Space');
   await page.keyboard.press('ArrowDown');
+  await page.keyboard.press('Enter');
   await expect(certificate).toHaveValue('test-identity');
   await page.getByRole('button', { name: '开始签名' }).focus();
   await page.keyboard.press('Enter');
