@@ -235,8 +235,7 @@ fn looks_like_pem(data: &[u8]) -> bool {
 fn load_pfx_bundle(data: &[u8], password: Option<&str>) -> Result<CertBundle, CodeSignError> {
     let password = password.unwrap_or("");
 
-    let pfx = p12::PFX::parse(data)
-        .map_err(|e| CodeSignError::Certificate(format!("Invalid PFX: {e:?}")))?;
+    let pfx = crypto::parse_pfx_data(data).map_err(CodeSignError::Certificate)?;
 
     if !pfx.verify_mac(password) {
         return Err(CodeSignError::Certificate(

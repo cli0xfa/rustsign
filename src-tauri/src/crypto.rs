@@ -45,12 +45,12 @@ fn is_pem_data(data: &[u8]) -> bool {
 }
 
 pub(crate) fn parse_pfx_data(data: &[u8]) -> Result<p12::PFX, String> {
-    // Try strict DER parse first (works for most compliant PFX files)
+    // Prefer the crate parser for standard PFX files.
     if let Ok(pfx) = p12::PFX::parse(data) {
         return Ok(pfx);
     }
 
-    // Fallback 1: try stripping 4-byte LE length prefix (Windows certutil)
+    // Some Windows tools prepend the DER length as a 4-byte little-endian value.
     if data.len() > 4 {
         let prefix_len = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as usize;
         if prefix_len > 0
@@ -60,62 +60,114 @@ pub(crate) fn parse_pfx_data(data: &[u8]) -> Result<p12::PFX, String> {
         {
             return Ok(pfx);
         }
+
+        if prefix_len > 0
+            && prefix_len <= data.len() - 4
+            && prefix_len >= data.len().saturating_sub(8)
+            && let Some(normalized) = add_default_mac_iterations(&data[4..])
+            && let Ok(pfx) = p12::PFX::parse(&normalized)
+        {
+            return Ok(pfx);
+        }
     }
 
-    // Fallback 2: Some PFX exporters produce MacData that can't be parsed
-    // by the p12 crate's strict parser. We reconstruct the PFX without MacData,
-    // which is safe because verify_mac returns true when mac_data is None.
-    parse_pfx_skip_mac(data).map_err(|e| format!("Invalid PFX: {e:?}"))
+    // PKCS#12 gives MacData.iterations a default of 1, but the p12 crate's
+    // parser requires the field to be present. Normalize only that valid
+    // omission so the original MAC is still checked against the password.
+    if let Some(normalized) = add_default_mac_iterations(data)
+        && let Ok(pfx) = p12::PFX::parse(&normalized)
+    {
+        return Ok(pfx);
+    }
+
+    Err("Invalid PFX: unsupported or malformed DER encoding".to_string())
 }
 
-/// Read a DER tag+length at `offset`. Returns (header_size, content_start, content_length).
-fn read_der_length(data: &[u8], offset: usize) -> Option<(usize, usize, usize)> {
-    let length_byte = *data.get(offset + 1)?;
-    if length_byte & 0x80 == 0 {
-        let header = offset + 2;
-        Some((header, header, length_byte as usize))
+/// Read a DER element at `offset`, returning its tag, content bounds, and end offset.
+fn read_der_element(data: &[u8], offset: usize) -> Option<(u8, usize, usize)> {
+    let tag = *data.get(offset)?;
+    // The structures normalized here only use single-byte DER tags.
+    if tag & 0x1f == 0x1f {
+        return None;
+    }
+
+    let first_length = *data.get(offset + 1)?;
+    let (header_len, content_len) = if first_length & 0x80 == 0 {
+        (2usize, first_length as usize)
     } else {
-        let num_len_bytes = (length_byte & 0x7f) as usize;
-        if num_len_bytes == 0 || num_len_bytes > 4 {
+        let length_octets = (first_length & 0x7f) as usize;
+        if length_octets == 0 || length_octets > std::mem::size_of::<usize>() {
             return None;
         }
         let mut content_len = 0usize;
-        for i in 0..num_len_bytes {
-            content_len = (content_len << 8) | (*data.get(offset + 2 + i)? as usize);
+        for index in 0..length_octets {
+            content_len = content_len.checked_mul(256)?;
+            content_len = content_len.checked_add(*data.get(offset + 2 + index)? as usize)?;
         }
-        let header = offset + 2 + num_len_bytes;
-        Some((header, header, content_len))
-    }
+        (2 + length_octets, content_len)
+    };
+
+    let content_start = offset.checked_add(header_len)?;
+    let content_end = content_start.checked_add(content_len)?;
+    (content_end <= data.len()).then_some((tag, content_start, content_end))
 }
 
-/// Parse a PFX by extracting the ContentInfo manually and skipping MacData.
-/// Used as a fallback for PFX files with non-standard MacData encoding
-/// that the p12 crate's strict parser rejects.
-fn parse_pfx_skip_mac(data: &[u8]) -> Result<p12::PFX, String> {
-    // PFX structure: SEQUENCE { INTEGER(version=3), SEQUENCE(ContentInfo), MacData }
-    let _ = read_der_length(data, 0).ok_or_else(|| "Invalid PFX outer SEQUENCE".to_string())?;
+fn encode_der_element(tag: u8, content: &[u8]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(content.len() + 6);
+    encoded.push(tag);
+    if content.len() < 128 {
+        encoded.push(content.len() as u8);
+    } else {
+        let length_bytes = content.len().to_be_bytes();
+        let first_nonzero = length_bytes
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(length_bytes.len() - 1);
+        let length_bytes = &length_bytes[first_nonzero..];
+        encoded.push(0x80 | length_bytes.len() as u8);
+        encoded.extend_from_slice(length_bytes);
+    }
+    encoded.extend_from_slice(content);
+    encoded
+}
 
-    // Version is at offset 4: 02 01 03 (3 bytes)
-    if data.get(4..7) != Some(&[0x02, 0x01, 0x03]) {
-        return Err("Unexpected PFX version encoding".to_string());
+/// Insert the ASN.1 DEFAULT value for an omitted MacData.iterations field.
+fn add_default_mac_iterations(data: &[u8]) -> Option<Vec<u8>> {
+    let (outer_tag, outer_content_start, outer_end) = read_der_element(data, 0)?;
+    if outer_tag != 0x30 || outer_end != data.len() {
+        return None;
     }
 
-    // ContentInfo SEQUENCE starts at offset 7
-    let (_, ci_content_start, ci_content_len) =
-        read_der_length(data, 7).ok_or_else(|| "Invalid ContentInfo SEQUENCE".to_string())?;
-    let ci_end = ci_content_start + ci_content_len;
+    let (version_tag, _, version_end) = read_der_element(data, outer_content_start)?;
+    if version_tag != 0x02 {
+        return None;
+    }
+    let (auth_safe_tag, _, auth_safe_end) = read_der_element(data, version_end)?;
+    if auth_safe_tag != 0x30 {
+        return None;
+    }
+    let (mac_data_tag, mac_content_start, mac_end) = read_der_element(data, auth_safe_end)?;
+    if mac_data_tag != 0x30 || mac_end != outer_end {
+        return None;
+    }
 
-    // Extract just the ContentInfo bytes (without trailing MacData)
-    let ci_bytes = &data[7..ci_end];
+    let (digest_info_tag, _, digest_info_end) = read_der_element(data, mac_content_start)?;
+    if digest_info_tag != 0x30 {
+        return None;
+    }
+    let (salt_tag, _, salt_end) = read_der_element(data, digest_info_end)?;
+    if salt_tag != 0x04 || salt_end != mac_end {
+        // The field already exists, or MacData has an unsupported shape.
+        return None;
+    }
 
-    let auth_safe = p12::ContentInfo::from_der(ci_bytes)
-        .map_err(|e| format!("ContentInfo parse error: {e:?}"))?;
+    let mut mac_content = data[mac_content_start..mac_end].to_vec();
+    mac_content.extend_from_slice(&[0x02, 0x01, 0x01]);
+    let normalized_mac_data = encode_der_element(0x30, &mac_content);
 
-    Ok(p12::PFX {
-        version: 3,
-        auth_safe,
-        mac_data: None,
-    })
+    let mut outer_content = data[outer_content_start..auth_safe_end].to_vec();
+    outer_content.extend_from_slice(&normalized_mac_data);
+    Some(encode_der_element(0x30, &outer_content))
 }
 
 fn load_pfx(data: &[u8], password: Option<&str>) -> Result<LoadedCertificate, CodeSignError> {
