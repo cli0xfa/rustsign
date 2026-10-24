@@ -246,9 +246,19 @@ pub fn sync_window_chrome(
 #[tauri::command]
 pub fn window_system_action(window: WebviewWindow, action: String) -> Result<(), CommandError> {
     #[cfg(windows)]
-    windows::system_action(&window, &action).map_err(desktop_error)?;
-    #[cfg(not(windows))]
-    let _ = (window, action);
+    if matches!(action.as_str(), "move" | "resize") {
+        return windows::system_action(&window, &action).map_err(desktop_error);
+    }
+    // Keep the portable implementation type-checked on Windows as well.
+    match action.as_str() {
+        "move" => window.start_dragging().map_err(desktop_error)?,
+        "resize" => window
+            .as_ref()
+            .window()
+            .start_resize_dragging(tauri_runtime::ResizeDirection::SouthEast)
+            .map_err(desktop_error)?,
+        _ => return Err(desktop_error("Unsupported window action.")),
+    }
     Ok(())
 }
 

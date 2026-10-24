@@ -453,17 +453,11 @@ mod tests {
 
     #[test]
     fn write_and_read_multiple_signatures() {
-        // Find a test PE file
         let test_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
-            .join("demo")
-            .join("bin");
-        let src = test_dir.join("test.sys");
-        if !src.exists() {
-            eprintln!("Skipping: test.sys not found");
-            return;
-        }
+            .join("test_data");
+        let src = test_dir.join("test_hello.exe");
 
         let tmp = std::env::temp_dir().join(format!(
             "multi-sig-test-{}.sys",

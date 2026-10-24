@@ -216,7 +216,7 @@ const copy: Record<string, readonly [string, string]> = {
   ],
   unavailableError: [
     '当前环境无法调用桌面功能，请在 RustSign 桌面应用中操作。',
-    'Desktop services are unavailable. Open RustSign on Windows to continue.',
+    'Desktop services are unavailable. Open the RustSign desktop app to continue.',
   ],
   unknownError: [
     '操作未完成，请查看技术详情后重试。',

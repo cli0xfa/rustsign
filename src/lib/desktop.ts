@@ -69,5 +69,5 @@ export async function windowAction(
 
 export async function desktopVersion() {
   if (window.__TAURI__?.app) return window.__TAURI__.app.getVersion();
-  return '0.3.0';
+  return '0.3.1';
 }

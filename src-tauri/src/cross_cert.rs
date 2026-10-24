@@ -64,10 +64,7 @@ pub struct CrossCertResult {
 }
 
 pub fn default_cross_cert_store_path() -> PathBuf {
-    let mut path = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    path.push("rustsign");
-    path.push("cross-certs");
-    path
+    crate::data_dir().join("cross-certs")
 }
 
 /// Download Microsoft cross certificates.
@@ -369,10 +366,9 @@ mod tests {
     }
 
     #[test]
-    fn default_cross_cert_store_path_ends_with_cross_certs() {
+    fn default_cross_cert_store_path_uses_configured_data_directory() {
         let path = default_cross_cert_store_path();
-        let text = path.to_string_lossy().replace('\\', "/");
-        assert!(text.ends_with("/rustsign/cross-certs"));
+        assert_eq!(path, crate::data_dir().join("cross-certs"));
     }
 
     #[test]

@@ -13,10 +13,22 @@ permissions:
 
 jobs:
   check:
-    name: Check & Test
-    runs-on: windows-latest
+    name: Check & Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-22.04, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Linux desktop dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+
+      - uses: dtolnay/rust-toolchain@stable
 
       - uses: actions/setup-node@v4
         with:
@@ -41,7 +53,7 @@ jobs:
         run: npm test
 
       - name: Install test browser
-        run: npx playwright install chromium
+        run: npx playwright install --with-deps chromium
 
       - name: Browser workflow and layout tests
         run: npx playwright test

@@ -11,6 +11,26 @@ fn cert_db_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
+fn historical_driver_pfx() -> Option<PathBuf> {
+    let path = std::env::var_os("RUSTSIGN_TEST_DRIVER_PFX")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("test_data/1.pfx")
+        });
+    if path.is_file() {
+        Some(path)
+    } else {
+        eprintln!(
+            "Skipping optional historical driver fixture: {}",
+            path.display()
+        );
+        None
+    }
+}
+
 #[test]
 fn test_end_to_end_sign_and_verify() {
     // Paths to test files (relative to workspace root)
@@ -75,11 +95,6 @@ fn test_end_to_end_sign_and_verify() {
 
 #[test]
 fn test_authenticode_cms_structure_matches_windows_expectations() {
-    if !cfg!(windows) {
-        eprintln!("Skipping test: Get-AuthenticodeSignature is only available on Windows");
-        return;
-    }
-
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -184,7 +199,9 @@ fn test_authenticode_cms_structure_matches_windows_expectations() {
         .expect("SpcSpOpusInfo DER");
     assert_eq!(opus_der, vec![0x30, 0x00]);
 
-    let status = std::process::Command::new("powershell")
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("powershell")
         .args([
             "-NoProfile",
             "-Command",
@@ -195,16 +212,17 @@ fn test_authenticode_cms_structure_matches_windows_expectations() {
         ])
         .output()
         .expect("run Get-AuthenticodeSignature");
-    assert!(
-        status.status.success(),
-        "Get-AuthenticodeSignature failed: {}",
-        String::from_utf8_lossy(&status.stderr)
-    );
-    let status_text = String::from_utf8_lossy(&status.stdout).trim().to_string();
-    assert_ne!(
-        status_text, "HashMismatch",
-        "Windows still reports HashMismatch"
-    );
+        assert!(
+            status.status.success(),
+            "Get-AuthenticodeSignature failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+        let status_text = String::from_utf8_lossy(&status.stdout).trim().to_string();
+        assert_ne!(
+            status_text, "HashMismatch",
+            "Windows still reports HashMismatch"
+        );
+    }
 
     let _ = std::fs::remove_file(&signed_pe);
 }
@@ -335,14 +353,9 @@ fn test_signing_ignores_duplicate_certificates_in_bundle() {
 
 #[test]
 fn test_driver_signing_with_historical_pfx_excludes_self_signed_root() {
-    let historical_pfx = std::path::PathBuf::from(r"D:\Desktop\avk\10sign\1.pfx");
-    if !historical_pfx.exists() {
-        eprintln!(
-            "Skipping test: historical PFX not found at {}",
-            historical_pfx.display()
-        );
+    let Some(historical_pfx) = historical_driver_pfx() else {
         return;
-    }
+    };
 
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -357,17 +370,8 @@ fn test_driver_signing_with_historical_pfx_excludes_self_signed_root() {
     let signed_pe = test_dir.join("test_hello_driver_chain.exe");
     std::fs::copy(&pe_file, &signed_pe).expect("copy PE");
 
-    let cross_cert = PathBuf::from(
-        r"C:\Users\tian\AppData\Local\rustsign\cross-certs\VeriSign_G5_to_Microsoft_Code_Verification_Root.cer",
-    );
-    if !cross_cert.exists() {
-        eprintln!(
-            "Skipping test: cross-cert not found at {}",
-            cross_cert.display()
-        );
-        let _ = std::fs::remove_file(&signed_pe);
-        return;
-    }
+    let cross_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/cross-certs/VeriSign_G5_to_Microsoft_Code_Verification_Root.pem");
 
     let request = rustsign_lib::SignRequest {
         file_path: signed_pe.to_string_lossy().to_string(),
@@ -957,15 +961,9 @@ fn build_timestamp_response_fixture() -> Vec<u8> {
 
 #[test]
 fn test_driver_sign_with_real_pfx_excludes_self_signed_root() {
-    let pfx_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("test_data")
-        .join("1.pfx");
-    if !pfx_path.exists() {
-        eprintln!("Skipping: 1.pfx not found");
+    let Some(pfx_path) = historical_driver_pfx() else {
         return;
-    }
+    };
 
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1051,13 +1049,9 @@ fn test_driver_sign_with_real_pfx_excludes_self_signed_root() {
 /// status Windows reports for `true.sys` — "UnknownError" with the message
 /// "terminated in a root certificate which is not trusted" — and crucially NOT
 /// "could not be built to a trusted root authority".
+#[cfg(windows)]
 #[test]
 fn test_generated_self_signed_cert_builds_chain_on_windows() {
-    if !cfg!(windows) {
-        eprintln!("Skipping test: Get-AuthenticodeSignature is only available on Windows");
-        return;
-    }
-
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()

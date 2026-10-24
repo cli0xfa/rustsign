@@ -381,6 +381,102 @@ mod tests {
     use der::asn1::Any;
 
     #[test]
+    fn sign_and_timestamp_pe_with_local_tsa_for_all_digests() {
+        use sha2::Digest;
+
+        let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let certificate = workspace.join("test_data/test_combined.pem");
+        let loaded = crypto::load_certificate(&certificate, None).expect("fixture certificate");
+        let server = tiny_http::Server::http("127.0.0.1:0").expect("loopback TSA");
+        let port = server.server_addr().to_ip().expect("TCP address").port();
+        let config = LocalTsaConfig {
+            port,
+            fixed_time_secs: Some(1_700_000_000),
+            tsa_name: Some("Portable RustSign TSA".into()),
+            ..Default::default()
+        };
+        let server_thread = std::thread::spawn(move || {
+            for _ in 0..4 {
+                let request = server
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("receive request")
+                    .expect("timestamp request before timeout");
+                assert_eq!(request.method(), &tiny_http::Method::Post);
+                handle_tsa_request(request, &loaded, &config);
+            }
+        });
+        let output =
+            std::env::temp_dir().join(format!("rustsign 跨平台-{}.exe", uuid::Uuid::new_v4()));
+        std::fs::copy(workspace.join("test_data/test_hello.exe"), &output)
+            .expect("copy PE fixture");
+
+        for algorithm in ["sha1", "sha256", "sha384", "sha512"] {
+            let result = crate::sign_file(&crate::SignRequest {
+                file_path: output.to_string_lossy().into_owned(),
+                cert_id: None,
+                cert_path: Some(certificate.to_string_lossy().into_owned()),
+                cert_password: None,
+                sign_mode: "app".into(),
+                digest_algorithm: algorithm.into(),
+                timestamp_url: Some(format!("http://127.0.0.1:{port}")),
+                description: None,
+                url: None,
+                cross_cert_path: None,
+                replace_signature: true,
+            })
+            .expect("sign and timestamp PE");
+            assert!(result.success, "{algorithm}: {}", result.message);
+            let verified = crate::verify_signature(output.to_str().unwrap()).expect("verify PE");
+            assert!(verified.valid, "{algorithm}: {}", verified.message);
+            assert!(verified.has_timestamp);
+
+            let entries = crate::pe::read_all_signatures(&std::fs::read(&output).unwrap())
+                .expect("PE certificate table");
+            let ci = crate::verify::parse_content_info(&entries[0].data).unwrap();
+            let signed_data = crate::verify::parse_signed_data(&ci).unwrap();
+            let signer = signed_data.signer_infos.0.iter().next().unwrap();
+            let timestamp = signer
+                .unsigned_attrs
+                .as_ref()
+                .unwrap()
+                .iter()
+                .find(|attr| attr.oid.to_string() == "1.3.6.1.4.1.311.3.3.1")
+                .expect("Authenticode timestamp attribute");
+            let token: ContentInfo = timestamp.values.iter().next().unwrap().decode_as().unwrap();
+            let token_data = crate::verify::parse_signed_data(&token).unwrap();
+            assert_eq!(
+                token_data.encap_content_info.econtent_type,
+                signer::ID_CT_TST_INFO
+            );
+            let content = token_data.encap_content_info.econtent.unwrap();
+            let info = TSTInfo::from_der(content.value()).expect("RFC 3161 TSTInfo");
+            assert_eq!(info.gen_time.to_unix_duration().as_secs(), 1_700_000_000);
+            assert!(info.tsa.is_some());
+            assert_eq!(
+                info.message_imprint.hash_algorithm.oid,
+                signer.digest_alg.oid
+            );
+            let signature = signer.signature.as_bytes();
+            let expected_hash = match algorithm {
+                "sha1" => sha1::Sha1::digest(signature).to_vec(),
+                "sha384" => sha2::Sha384::digest(signature).to_vec(),
+                "sha512" => sha2::Sha512::digest(signature).to_vec(),
+                _ => sha2::Sha256::digest(signature).to_vec(),
+            };
+            assert_eq!(
+                info.message_imprint.hashed_message.as_bytes(),
+                expected_hash
+            );
+        }
+
+        server_thread.join().expect("TSA thread");
+        std::fs::remove_file(output).expect("remove PE copy");
+    }
+
+    #[test]
     fn wildcard_binding_advertises_a_connectable_local_url() {
         let config = LocalTsaConfig {
             bind_address: "0.0.0.0".into(),

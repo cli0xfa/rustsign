@@ -2,8 +2,8 @@ use crate::CodeSignError;
 use cms::content_info::ContentInfo;
 use cms::signed_data::{SignedData, SignerInfo, SignerInfos};
 use const_oid::ObjectIdentifier;
-use der::asn1::{Any, OctetString, SetOfVec};
-use der::{Decode, Encode, Sequence};
+use der::asn1::{Any, AnyRef, OctetString, SetOfVec};
+use der::{Decode, Encode, Reader, Sequence};
 use reqwest::blocking::Client;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use std::path::Path;
@@ -273,68 +273,17 @@ fn parse_timestamp_response_raw(response: &[u8]) -> Result<Vec<u8>, CodeSignErro
 
 /// Extract the raw DER bytes of the second SEQUENCE (ContentInfo) from a TimeStampResp.
 fn extract_content_info_from_resp(data: &[u8]) -> Option<Vec<u8>> {
-    if data.len() < 2 {
-        return None;
-    }
-    let lb = data[1];
-    let (header_len, _value_len) = if lb & 0x80 == 0 {
-        (2, lb as usize)
-    } else {
-        let n = (lb & 0x7F) as usize;
-        if data.len() < 2 + n {
-            return None;
-        }
-        let mut vl = 0usize;
-        for i in 0..n {
-            vl = (vl << 8) | (data[2 + i] as usize);
-        }
-        (2 + n, vl)
-    };
-
-    // data[header_len..header_len + value_len] is the SEQUENCE content.
-    // First child: PKIStatusInfo (SEQUENCE). Skip it.
-    let inner = &data[header_len..header_len + _value_len];
-    if inner.len() < 2 {
-        return None;
-    }
-    let lb2 = inner[1];
-    let (status_hdr, status_vl) = if lb2 & 0x80 == 0 {
-        (2, lb2 as usize)
-    } else {
-        let n = (lb2 & 0x7F) as usize;
-        if inner.len() < 2 + n {
-            return None;
-        }
-        let mut vl = 0usize;
-        for i in 0..n {
-            vl = (vl << 8) | (inner[2 + i] as usize);
-        }
-        (2 + n, vl)
-    };
-
-    // The second child is the ContentInfo (the timestamp token)
-    let ci_start = status_hdr + status_vl;
-    if ci_start >= inner.len() {
-        return None;
-    }
-    Some(inner[ci_start..].to_vec())
-}
-
-fn parse_timestamp_response(response: &[u8]) -> Result<ContentInfo, CodeSignError> {
-    let response = TimeStampResp::from_der(response).map_err(|e| {
-        CodeSignError::Timestamp(format!("Failed to parse RFC3161 response: {e:?}"))
-    })?;
-
-    match response.status.status {
-        0 | 1 => response.time_stamp_token.ok_or_else(|| {
-            CodeSignError::Timestamp(
-                "Timestamp service returned success without a timestamp token".to_string(),
-            )
-        }),
-        status => Err(CodeSignError::Timestamp(format!(
-            "Timestamp service returned failure status {status}"
-        ))),
-    }
+    // Use checked DER lengths on every platform, but copy the original token
+    // TLV instead of serializing ContentInfo again.
+    AnyRef::from_der(data)
+        .ok()?
+        .sequence(|reader| {
+            let _: PkiStatusInfo = reader.decode()?;
+            let token = reader.tlv_bytes()?;
+            ContentInfo::from_der(token)?;
+            Ok(token.to_vec())
+        })
+        .ok()
 }
 
 /// Attach a timestamp token using the raw DER bytes from the TSA response,
@@ -369,17 +318,7 @@ fn attach_timestamp_token_raw(
     encode_signed_data(&updated_signed_data)
 }
 
-fn attach_timestamp_token(
-    signed_data: &SignedData,
-    timestamp_token: ContentInfo,
-) -> Result<Vec<u8>, CodeSignError> {
-    let token_der = timestamp_token.to_der().map_err(|e| {
-        CodeSignError::Timestamp(format!("Failed to encode timestamp token: {e:?}"))
-    })?;
-    attach_timestamp_token_raw(signed_data, &token_der)
-}
-
-/// Same as signer_info_with_timestamp but accepts raw token DER bytes.
+/// Replace timestamp attributes without re-encoding the supplied token.
 fn signer_info_with_timestamp_raw(
     signer_info: &SignerInfo,
     token_der: &[u8],
@@ -426,23 +365,6 @@ fn timestamp_attribute_raw(token_der: &[u8]) -> Result<Attribute, CodeSignError>
         oid: TIMESTAMP_ATTRIBUTE_OID,
         values,
     })
-}
-
-fn signer_info_with_timestamp(
-    signer_info: &SignerInfo,
-    timestamp_token: &ContentInfo,
-) -> Result<SignerInfo, CodeSignError> {
-    let token_der = timestamp_token.to_der().map_err(|e| {
-        CodeSignError::Timestamp(format!("Failed to encode timestamp token: {e:?}"))
-    })?;
-    signer_info_with_timestamp_raw(signer_info, &token_der)
-}
-
-fn timestamp_attribute(timestamp_token: &ContentInfo) -> Result<Attribute, CodeSignError> {
-    let token_der = timestamp_token.to_der().map_err(|e| {
-        CodeSignError::Timestamp(format!("Failed to encode timestamp token: {e:?}"))
-    })?;
-    timestamp_attribute_raw(&token_der)
 }
 
 fn encode_signed_data(signed_data: &SignedData) -> Result<Vec<u8>, CodeSignError> {
@@ -520,26 +442,98 @@ mod tests {
         .to_der()
         .expect("encode response");
 
-        let parsed = parse_timestamp_response(&response).expect("parse response");
-        assert_eq!(parsed, token);
+        let parsed = parse_timestamp_response_raw(&response).expect("parse response");
+        assert_eq!(parsed, token.to_der().expect("encode token"));
     }
 
     #[test]
-    #[ignore = "known issue: timestamp attribute replacement counts differ on CI runner"]
-    fn attach_timestamp_replaces_previous_timestamp_attributes() {
-        let signed_data = signed_data_fixture();
-        let timestamp_token = fake_timestamp_token();
+    fn timestamp_response_preserves_long_token_der() {
+        let token = ContentInfo {
+            content_type: const_oid::db::rfc5911::ID_DATA,
+            content: Any::new(Tag::OctetString, vec![0x42; 512]).expect("long token"),
+        };
+        let response = TimeStampResp {
+            status: PkiStatusInfo {
+                status: 1,
+                status_string: None,
+                fail_info: None,
+            },
+            time_stamp_token: Some(token.clone()),
+        }
+        .to_der()
+        .expect("encode response");
 
-        let first_signer = signed_data
+        assert_eq!(
+            parse_timestamp_response_raw(&response).expect("granted with modifications"),
+            token.to_der().expect("token DER")
+        );
+    }
+
+    #[test]
+    fn timestamp_response_rejects_failure_and_missing_token() {
+        for status in [0, 1, 2, 3, 4, 5] {
+            let response = TimeStampResp {
+                status: PkiStatusInfo {
+                    status,
+                    status_string: None,
+                    fail_info: None,
+                },
+                time_stamp_token: None,
+            }
+            .to_der()
+            .expect("encode response");
+            assert!(parse_timestamp_response_raw(&response).is_err());
+        }
+    }
+
+    #[test]
+    fn malformed_timestamp_lengths_return_errors_without_panicking() {
+        let malformed: &[&[u8]] = &[
+            &[],
+            &[0x30],
+            &[0x30, 0x7f],
+            &[0x30, 0x80],
+            &[0x30, 0x82, 0xff, 0xff],
+            &[0x30, 0x02, 0x30, 0x7f],
+            &[
+                0x30, 0x89, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            ],
+        ];
+        for response in malformed {
+            assert!(extract_content_info_from_resp(response).is_none());
+            assert!(parse_timestamp_response_raw(response).is_err());
+        }
+    }
+
+    #[test]
+    fn attach_timestamp_replaces_previous_timestamp_attributes() {
+        let mut signed_data = signed_data_fixture();
+        let timestamp_token = fake_timestamp_token();
+        let token_der = timestamp_token.to_der().expect("token DER");
+        let mut signers = signed_data
             .signer_infos
             .0
             .iter()
-            .next()
-            .expect("signer before timestamp");
-        assert!(first_signer.unsigned_attrs.is_none());
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut microsoft_attr = timestamp_attribute_raw(&token_der).expect("Microsoft attr");
+        let mut standard_attr = microsoft_attr.clone();
+        standard_attr.oid = RFC3161_TIMESTAMP_TOKEN_OID;
+        // An unrelated unsigned attribute must survive timestamp replacement.
+        microsoft_attr.oid = ObjectIdentifier::new_unwrap("1.2.3.4");
+        let preserved_attr = microsoft_attr.clone();
+        signers[0].unsigned_attrs = Some(
+            Attributes::try_from(vec![
+                timestamp_attribute_raw(&token_der).expect("old timestamp"),
+                standard_attr,
+                preserved_attr.clone(),
+            ])
+            .expect("old unsigned attributes"),
+        );
+        signed_data.signer_infos = SignerInfos::try_from(signers).expect("signers");
 
         let updated_cms =
-            attach_timestamp_token(&signed_data, timestamp_token.clone()).expect("attach token");
+            attach_timestamp_token_raw(&signed_data, &token_der).expect("attach token");
         let content_info =
             crate::verify::parse_content_info(&updated_cms).expect("parse updated content info");
         let updated_signed_data =
@@ -557,9 +551,24 @@ mod tests {
 
         let timestamp_attrs = attrs
             .iter()
-            .filter(|attr| attr.oid == RFC3161_TIMESTAMP_TOKEN_OID)
+            .filter(|attr| attr.oid == TIMESTAMP_ATTRIBUTE_OID)
             .count();
         assert_eq!(timestamp_attrs, 1);
+        assert!(
+            !attrs
+                .iter()
+                .any(|attr| attr.oid == RFC3161_TIMESTAMP_TOKEN_OID)
+        );
+        assert!(attrs.iter().any(|attr| attr == &preserved_attr));
+        let token_value = attrs
+            .iter()
+            .find(|attr| attr.oid == TIMESTAMP_ATTRIBUTE_OID)
+            .unwrap()
+            .values
+            .iter()
+            .next()
+            .unwrap();
+        assert_eq!(token_value.to_der().expect("stored token DER"), token_der);
     }
 
     fn fake_timestamp_token() -> ContentInfo {

@@ -394,22 +394,32 @@ mod tests {
 
     #[test]
     fn load_pfx_keeps_self_signed_roots_in_chain_for_cms_embedding() {
-        let pfx_path = PathBuf::from(r"D:\Desktop\avk\10sign\1.pfx");
-        if !pfx_path.exists() {
-            eprintln!(
-                "Skipping test: historical PFX not found at {}",
-                pfx_path.display()
-            );
-            return;
-        }
+        use der::Encode;
 
-        let loaded = load_certificate(&pfx_path, None).expect("load historical PFX");
-        // Self-signed roots are now kept in extra_certs so the CMS chain is complete.
-        // Windows can then show "processed chain, terminates in untrusted root"
-        // instead of the vague "cannot verify signature".
-        assert!(
-            !loaded.extra_certs.is_empty(),
-            "chain should include issuer certs"
-        );
+        let root_pem = std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("test_data/test_cert.pem"),
+        )
+        .expect("root fixture");
+        let (_, root_der) = pem_rfc7468::decode_vec(&root_pem).expect("root DER");
+        let (_, sign) = crate::cert_gen::generate_test_cert_pair(&Default::default())
+            .expect("generate separate signing identity");
+        let (_, cert_der) = pem_rfc7468::decode_vec(sign.cert_pem.as_bytes()).unwrap();
+        let (_, key_der) = pem_rfc7468::decode_vec(sign.key_pem.as_bytes()).unwrap();
+        let pfx = p12::PFX::new_with_cas(&cert_der, &key_der, &[&root_der], "testpass", "codesign")
+            .expect("PFX with self-signed root");
+        let pfx_path = unique_temp_path("with-root.pfx");
+        std::fs::write(&pfx_path, pfx.to_der()).unwrap();
+
+        let loaded = load_certificate(&pfx_path, Some("testpass")).expect("load PFX with root");
+        let root = loaded
+            .extra_certs
+            .iter()
+            .find(|cert| cert.to_der().unwrap() == root_der)
+            .expect("self-signed root must remain embedded");
+        assert_eq!(root.tbs_certificate.subject, root.tbs_certificate.issuer);
+        std::fs::remove_file(pfx_path).unwrap();
     }
 }
