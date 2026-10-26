@@ -1,7 +1,8 @@
 [package]
 name = "rustsign"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
+license = "MIT"
 
 [lib]
 name = "rustsign_lib"
@@ -61,6 +62,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "fs", "sync", "time"] }
 dirs = "5"
 # Random number generation
 rand = "0.8"
+keyring = "4.2"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

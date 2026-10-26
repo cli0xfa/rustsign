@@ -7,11 +7,22 @@ use std::fs;
 use std::path::Path;
 use x509_cert::Certificate;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LoadedCertificate {
     pub cert: Certificate,
     pub private_key: Vec<u8>,
     pub extra_certs: Vec<Certificate>,
+}
+
+impl std::fmt::Debug for LoadedCertificate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LoadedCertificate")
+            .field("cert", &self.cert)
+            .field("private_key", &"[REDACTED]")
+            .field("extra_certs", &self.extra_certs)
+            .finish()
+    }
 }
 
 /// Load a certificate bundle and private key from a file.
@@ -398,50 +409,6 @@ mod tests {
         assert_eq!(loaded.extra_certs.len(), 0);
 
         let _ = std::fs::remove_file(pfx_path);
-    }
-
-    #[test]
-    fn parse_demo_pfx_files() {
-        let demo_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("demo")
-            .join("cer");
-
-        let entries = std::fs::read_dir(&demo_dir);
-        let entries = match entries {
-            Ok(e) => e,
-            Err(_) => {
-                eprintln!("Skipping: demo/cer not found at {}", demo_dir.display());
-                return;
-            }
-        };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if !matches!(ext.to_ascii_lowercase().as_str(), "pfx" | "p12") {
-                continue;
-            }
-
-            let file_name = path.file_stem().unwrap_or_default().to_string_lossy();
-            // Password is after the last underscore in the filename
-            let password = file_name.rsplit('_').next().unwrap_or("");
-
-            let data = std::fs::read(&path).expect("read PFX");
-            match super::parse_pfx_data(&data) {
-                Ok(pfx) => {
-                    if !pfx.verify_mac(password) {
-                        eprintln!("FAIL {}: password '{}' rejected", path.display(), password);
-                    } else {
-                        eprintln!("OK   {} (password '{}')", path.display(), password);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("FAIL {}: {}", path.display(), e);
-                }
-            }
-        }
     }
 
     #[test]

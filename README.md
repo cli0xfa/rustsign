@@ -17,7 +17,7 @@
 
 - 支持导入 PEM（可含私钥）、PFX/P12（含密码保护）及 CRT/CER 公钥证书
 - 支持导出证书为 PEM、PFX 或 PVK+SPC 格式
-- 本地 JSON 数据库存储，数据目录通过系统标准用户数据目录解析（Windows 为 `%LOCALAPPDATA%/rustsign/`）
+- 本地 JSON 数据库存储，数据目录通过系统标准用户数据目录解析（Windows 为 `%LOCALAPPDATA%/rustsign/`）。导入的 PFX 密码保存在操作系统凭据库（Windows Credential Manager、macOS Keychain、Linux Secret Service），数据库只保存证书路径与元数据；旧版数据库中的明文密码会在首次读取时迁移到凭据库。Linux 桌面需要可用的 Secret Service。
 - 支持生成**自签名测试证书**（根证书 + 签名证书），可用于开发测试
 - 支持基于已有 CA 证书**签发从属证书**
 
@@ -130,11 +130,11 @@ powershell -File scripts/test-startup-failure.ps1 # 在 test:native 生成的测
 
 自动测试的浏览器截图位于 `artifacts/`，Windows 原生冒烟报告位于 `artifacts/native-smoke.json`。`desktop-smoke` Cargo feature 仅用于原生测试，默认构建不包含测试命令。调试构建可通过 `RUSTSIGN_DATA_DIR` 指定隔离数据目录，发布构建始终使用对应系统的本地数据位置。
 
-完整 Rust 测试请通过 `npm run test:rust` 运行，以免测试操作个人证书数据库。根 CA 模式会输出可用于签发子证书的 `test_root_ca.pfx`，其密码与本次生成配置一致；旧版自签名测试证书生成库接口继续保留。
+完整 Rust 测试请通过 `npm run test:rust` 运行，以免测试操作个人证书数据库。此隔离模式会将测试密码仅保存在当前测试进程的内存中。根 CA 模式会输出可用于签发子证书的 `test_root_ca.pfx`，其密码与本次生成配置一致；旧版自签名测试证书生成库接口继续保留。
 
 时间戳回归使用本机临时端口上的 TSA，覆盖四种摘要算法、固定时间、带空格与中文的文件路径、PE 签名与摘要验证以及时间戳消息摘要匹配，无需访问公网。ASN.1 测试另覆盖令牌 DER 保留、异常长度和时间戳属性替换。
 
-历史商业驱动证书的两项回归需要可选的 `test_data/1.pfx`，或通过 `RUSTSIGN_TEST_DRIVER_PFX` 指定该证书路径；未提供时会跳过。它们不再引用开发者机器的盘符或个人缓存。CMS 结构断言在所有平台执行，调用 `Get-AuthenticodeSignature` 的原生检查仅在 Windows 执行。
+驱动签名链回归在系统临时目录中生成一次性测试 CA、签名证书和 PFX；无需提供商业证书或私钥。`test_data/extracted-chain/` 中仅包含公开证书，用于验证交叉证书匹配。`test_data/test_key.pem` 和 `test_data/test_combined.pem` 含有已公开的自签名测试私钥，只能用于测试，不能用于真实代码签名。CMS 结构断言在所有平台执行，调用 `Get-AuthenticodeSignature` 的原生检查仅在 Windows 执行。
 
 ### 发布构建
 
@@ -179,8 +179,18 @@ Windows 安装包位于 `target/release/bundle/nsis/`。
 
 ## 更新日志
 
+### Unreleased
+
+### v0.3.3
+
+- 忽略 PFX/P12 私钥容器，移除会扫描本地证书目录并打印密码的诊断测试
+- 驱动签名回归改用运行时生成的临时测试证书，不再需要外部商业证书私钥
+- 将旧版 PFX 密码从 JSON 数据库迁移到操作系统凭据库；新数据库不保存明文密码
+- 为 Tauri WebView 配置内容安全策略，在调试输出中隐藏密码和密钥，并避免通过 IPC 返回生成的私钥 PEM
+
 ### v0.3.2
 
+- 安全提示：此版本会将导入的 PFX 密码以明文保存在本地 JSON 数据库中。请升级到 v0.3.3；如果曾在本机使用本版本，建议更换已导入证书的密码。
 - 修复部分 PKCS#12/PFX 文件因省略 MAC 迭代次数字段而无法导入的问题，并保留原有 MAC 与密码校验
 
 ### v0.3.1

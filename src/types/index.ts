@@ -8,7 +8,7 @@ export type AuthModalMode = 'import' | 'exportPfx' | null;
 export interface CertEntry {
   id: string;
   file_path: string;
-  password?: string | null;
+  has_saved_password?: boolean;
   subject: string;
   issuer: string;
   serial_number: string;
@@ -98,9 +98,7 @@ export interface TestCertResult {
   success: boolean;
   message: string;
   root_pem: string;
-  root_key_pem: string;
   sign_pem: string;
-  sign_key_pem: string;
   sign_pfx_path: string | null;
   output_files: string[];
 }

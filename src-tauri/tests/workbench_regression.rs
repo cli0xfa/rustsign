@@ -48,6 +48,8 @@ fn runtime_metadata_does_not_change_stored_schema_or_expose_passwords() {
     entry.password = Some("not-for-the-interface".into());
     let stored = serde_json::to_value(&entry).unwrap();
     assert!(stored.get("has_private_key").is_none());
+    assert!(stored.get("password").is_none());
+    assert!(!format!("{entry:?}").contains("not-for-the-interface"));
     let view = cert_manager::certificate_view(entry);
     assert!(view.file_readable);
     assert_eq!(view.has_private_key, Some(true));
@@ -58,6 +60,47 @@ fn runtime_metadata_does_not_change_stored_schema_or_expose_passwords() {
         cert_manager::parse_cert_info(fixture("test_cert.pem").to_str().unwrap(), None).unwrap(),
     );
     assert_eq!(public.has_private_key, Some(false));
+}
+
+#[test]
+fn legacy_certificate_passwords_migrate_out_of_the_json_database() {
+    if std::env::var_os("RUSTSIGN_DATA_DIR").is_none() {
+        return;
+    }
+
+    let mut database = cert_manager::CertDatabase::load().unwrap();
+    let mut entry =
+        cert_manager::parse_cert_info(fixture("test_combined.pem").to_str().unwrap(), None)
+            .unwrap();
+    let id = entry.id.clone();
+    entry.password = Some("migration-only-password".into());
+    database.certs.push(entry);
+
+    let mut legacy = serde_json::to_value(&database).unwrap();
+    let entries = legacy["certs"].as_array_mut().unwrap();
+    let legacy_entry = entries.last_mut().unwrap().as_object_mut().unwrap();
+    legacy_entry.insert(
+        "password".into(),
+        serde_json::json!("migration-only-password"),
+    );
+    legacy_entry.remove("has_saved_password");
+
+    let database_path = rustsign_lib::data_dir().join("certs.json");
+    std::fs::write(&database_path, serde_json::to_vec_pretty(&legacy).unwrap()).unwrap();
+
+    let migrated = cert_manager::CertDatabase::load().unwrap();
+    let migrated_entry = migrated.certs.iter().find(|entry| entry.id == id).unwrap();
+    assert_eq!(
+        migrated_entry.password.as_deref(),
+        Some("migration-only-password")
+    );
+    assert!(migrated_entry.has_saved_password);
+
+    let persisted = std::fs::read_to_string(database_path).unwrap();
+    assert!(!persisted.contains("migration-only-password"));
+    assert!(persisted.contains("has_saved_password"));
+
+    cert_manager::delete_certificate(&id).unwrap();
 }
 
 #[test]

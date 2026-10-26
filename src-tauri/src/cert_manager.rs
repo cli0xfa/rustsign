@@ -8,11 +8,14 @@ use uuid::Uuid;
 use x509_cert::Certificate;
 use x509_cert::ext::pkix::{BasicConstraints, ExtendedKeyUsage, KeyUsage};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct CertEntry {
     pub id: String,
     pub file_path: String,
+    #[serde(skip_serializing)]
     pub password: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_saved_password: bool,
     pub subject: String,
     pub issuer: String,
     pub serial_number: String,
@@ -22,7 +25,30 @@ pub struct CertEntry {
     pub thumbprint: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+impl std::fmt::Debug for CertEntry {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CertEntry")
+            .field("id", &self.id)
+            .field("file_path", &self.file_path)
+            .field("password", &self.password.as_ref().map(|_| "[REDACTED]"))
+            .field("has_saved_password", &self.has_saved_password)
+            .field("subject", &self.subject)
+            .field("issuer", &self.issuer)
+            .field("serial_number", &self.serial_number)
+            .field("not_before", &self.not_before)
+            .field("not_after", &self.not_after)
+            .field("signature_algorithm", &self.signature_algorithm)
+            .field("thumbprint", &self.thumbprint)
+            .finish()
+    }
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct CertDatabase {
     pub certs: Vec<CertEntry>,
 }
@@ -44,7 +70,8 @@ pub struct CertificateView {
 
 pub fn certificate_view(mut entry: CertEntry) -> CertificateView {
     let metadata = (|| -> Result<_, CodeSignError> {
-        let bundle = load_cert_bundle(&entry.file_path, entry.password.as_deref())?;
+        let password = password_for_entry(&entry)?;
+        let bundle = load_cert_bundle(&entry.file_path, password)?;
         let cert = Certificate::from_der(&bundle.cert_der)
             .map_err(|error| CodeSignError::Certificate(error.to_string()))?;
         let mut purposes = Vec::new();
@@ -132,11 +159,22 @@ pub fn list_certificate_views() -> Result<Vec<CertificateView>, CodeSignError> {
         .collect())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct CertBundle {
     cert_der: Vec<u8>,
     key_der: Option<Vec<u8>>,
     extra_cert_ders: Vec<Vec<u8>>,
+}
+
+impl std::fmt::Debug for CertBundle {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CertBundle")
+            .field("cert_der", &self.cert_der)
+            .field("key_der", &self.key_der.as_ref().map(|_| "[REDACTED]"))
+            .field("extra_cert_ders", &self.extra_cert_ders)
+            .finish()
+    }
 }
 
 impl CertDatabase {
@@ -148,8 +186,26 @@ impl CertDatabase {
         let path = Self::db_path();
         if path.exists() {
             let data = fs::read_to_string(&path)?;
-            let db: CertDatabase = serde_json::from_str(&data)
+            let mut db: CertDatabase = serde_json::from_str(&data)
                 .map_err(|e| CodeSignError::Certificate(format!("Parse DB error: {e:?}")))?;
+            let mut migrated_legacy_password = false;
+            for entry in &mut db.certs {
+                if let Some(password) = entry.password.take() {
+                    if password.is_empty() {
+                        entry.has_saved_password = false;
+                    } else {
+                        crate::credentials::store_password(&entry.id, &password)?;
+                        entry.has_saved_password = true;
+                        entry.password = Some(password);
+                    }
+                    migrated_legacy_password = true;
+                } else if entry.has_saved_password {
+                    entry.password = crate::credentials::load_password(&entry.id).unwrap_or(None);
+                }
+            }
+            if migrated_legacy_password {
+                db.save()?;
+            }
             Ok(db)
         } else {
             Ok(CertDatabase::default())
@@ -157,11 +213,19 @@ impl CertDatabase {
     }
 
     pub fn save(&self) -> Result<(), CodeSignError> {
+        let mut persisted = self.clone();
+        for entry in &mut persisted.certs {
+            if let Some(password) = entry.password.as_deref().filter(|value| !value.is_empty()) {
+                crate::credentials::store_password(&entry.id, password)?;
+                entry.has_saved_password = true;
+            }
+        }
+
         let path = Self::db_path();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let data = serde_json::to_string_pretty(self)
+        let data = serde_json::to_string_pretty(&persisted)
             .map_err(|e| CodeSignError::Certificate(format!("Serialize DB error: {e:?}")))?;
         fs::write(&path, data)?;
         Ok(())
@@ -192,7 +256,10 @@ pub fn parse_cert_info(
     Ok(CertEntry {
         id: Uuid::new_v4().to_string(),
         file_path: file_path.to_string(),
-        password: password.map(|value| value.to_string()),
+        password: password
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        has_saved_password: password.is_some_and(|value| !value.is_empty()),
         subject,
         issuer,
         serial_number: serial,
@@ -201,6 +268,17 @@ pub fn parse_cert_info(
         signature_algorithm: sig_algo,
         thumbprint,
     })
+}
+
+/// Resolve the password for an entry, reporting a useful error if the database says it
+/// was saved but the OS credential store no longer has it available.
+pub(crate) fn password_for_entry(entry: &CertEntry) -> Result<Option<&str>, CodeSignError> {
+    if entry.has_saved_password && entry.password.is_none() {
+        return Err(CodeSignError::Certificate(
+            "Saved PFX password is unavailable from the OS credential store. Unlock the credential store or reimport the certificate.".into(),
+        ));
+    }
+    Ok(entry.password.as_deref())
 }
 
 fn load_cert_bundle(file_path: &str, password: Option<&str>) -> Result<CertBundle, CodeSignError> {
@@ -396,7 +474,10 @@ pub fn import_certificate(
     let entry = parse_cert_info(file_path, password)?;
     let mut db = CertDatabase::load()?;
     db.certs.push(entry.clone());
-    db.save()?;
+    if let Err(error) = db.save() {
+        let _ = crate::credentials::delete_password(&entry.id);
+        return Err(error);
+    }
     Ok(entry)
 }
 
@@ -407,8 +488,19 @@ pub fn list_certificates() -> Result<Vec<CertEntry>, CodeSignError> {
 
 pub fn delete_certificate(id: &str) -> Result<(), CodeSignError> {
     let mut db = CertDatabase::load()?;
+    let removed = db.certs.iter().find(|entry| entry.id == id).cloned();
     db.certs.retain(|entry| entry.id != id);
-    db.save()?;
+    if let Some(entry) = &removed
+        && entry.has_saved_password
+    {
+        crate::credentials::delete_password(id)?;
+    }
+    if let Err(error) = db.save() {
+        if let Some(password) = removed.and_then(|entry| entry.password) {
+            let _ = crate::credentials::store_password(id, &password);
+        }
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -454,7 +546,8 @@ pub fn export_certificate(
         }
     };
 
-    let bundle = load_cert_bundle(&entry.file_path, entry.password.as_deref())?;
+    let source_password = password_for_entry(&entry)?;
+    let bundle = load_cert_bundle(&entry.file_path, source_password)?;
 
     match format {
         "pem" => export_as_pem(&bundle, output_path),

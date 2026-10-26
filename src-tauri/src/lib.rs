@@ -1,5 +1,6 @@
 pub mod cert_gen;
 pub mod cert_manager;
+pub mod credentials;
 pub mod cross_cert;
 pub mod crypto;
 pub mod local_tsa;
@@ -43,7 +44,7 @@ pub fn data_dir() -> PathBuf {
         .join("rustsign")
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct SignRequest {
     pub file_path: String,
     pub cert_id: Option<String>,
@@ -56,6 +57,28 @@ pub struct SignRequest {
     pub url: Option<String>,
     pub cross_cert_path: Option<String>,
     pub replace_signature: bool,
+}
+
+impl std::fmt::Debug for SignRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SignRequest")
+            .field("file_path", &self.file_path)
+            .field("cert_id", &self.cert_id)
+            .field("cert_path", &self.cert_path)
+            .field(
+                "cert_password",
+                &self.cert_password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("sign_mode", &self.sign_mode)
+            .field("digest_algorithm", &self.digest_algorithm)
+            .field("timestamp_url", &self.timestamp_url)
+            .field("description", &self.description)
+            .field("url", &self.url)
+            .field("cross_cert_path", &self.cross_cert_path)
+            .field("replace_signature", &self.replace_signature)
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -229,10 +252,16 @@ fn resolve_certificate_context(
     if let Some(id) = &request.cert_id {
         let entry = get_certificate(id)?;
         return match entry {
-            Some(entry) => Ok(ResolvedCertificateContext {
-                path: PathBuf::from(entry.file_path),
-                password: request.cert_password.clone().or(entry.password),
-            }),
+            Some(entry) => {
+                let password = match request.cert_password.clone() {
+                    Some(password) => Some(password),
+                    None => cert_manager::password_for_entry(&entry)?.map(ToOwned::to_owned),
+                };
+                Ok(ResolvedCertificateContext {
+                    path: PathBuf::from(entry.file_path),
+                    password,
+                })
+            }
             None => Err(CodeSignError::Certificate(
                 "Certificate not found".to_string(),
             )),

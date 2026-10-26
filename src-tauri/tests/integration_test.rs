@@ -11,26 +11,6 @@ fn cert_db_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn historical_driver_pfx() -> Option<PathBuf> {
-    let path = std::env::var_os("RUSTSIGN_TEST_DRIVER_PFX")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .unwrap()
-                .join("test_data/1.pfx")
-        });
-    if path.is_file() {
-        Some(path)
-    } else {
-        eprintln!(
-            "Skipping optional historical driver fixture: {}",
-            path.display()
-        );
-        None
-    }
-}
-
 #[test]
 fn test_end_to_end_sign_and_verify() {
     // Paths to test files (relative to workspace root)
@@ -352,38 +332,51 @@ fn test_signing_ignores_duplicate_certificates_in_bundle() {
 }
 
 #[test]
-fn test_driver_signing_with_historical_pfx_excludes_self_signed_root() {
-    let Some(historical_pfx) = historical_driver_pfx() else {
-        return;
-    };
-
+fn test_driver_signing_with_generated_ca_chain_excludes_self_signed_root() {
     let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
         .join("test_data");
     let pe_file = test_dir.join("test_hello.exe");
-    if !pe_file.exists() {
-        eprintln!("Skipping test: test EXE not found at {}", pe_file.display());
-        return;
-    }
+    assert!(
+        pe_file.exists(),
+        "test PE fixture missing: {}",
+        pe_file.display()
+    );
 
-    let signed_pe = test_dir.join("test_hello_driver_chain.exe");
+    let unique_suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let temp_dir = std::env::temp_dir().join(format!("rustsign-driver-chain-{unique_suffix}"));
+    std::fs::create_dir_all(&temp_dir).expect("create driver signing temp directory");
+
+    let generated = rustsign_lib::cert_gen::generate_test_cert_files(
+        rustsign_lib::CertGenOptions {
+            password: "test-only-password".into(),
+            ..Default::default()
+        },
+        Some(temp_dir.to_string_lossy().into_owned()),
+    )
+    .expect("generate temporary test CA and signing certificate");
+    let signing_pfx = generated.sign_pfx_path.expect("generated signing PFX path");
+    let cross_cert_dir = temp_dir.join("cross-certs");
+    std::fs::create_dir_all(&cross_cert_dir).expect("create empty cross-certificate directory");
+
+    let signed_pe = temp_dir.join("test_hello_driver_chain.exe");
     std::fs::copy(&pe_file, &signed_pe).expect("copy PE");
-
-    let cross_cert = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("assets/cross-certs/VeriSign_G5_to_Microsoft_Code_Verification_Root.pem");
 
     let request = rustsign_lib::SignRequest {
         file_path: signed_pe.to_string_lossy().to_string(),
         cert_id: None,
-        cert_path: Some(historical_pfx.to_string_lossy().to_string()),
-        cert_password: None,
+        cert_path: Some(signing_pfx),
+        cert_password: Some("test-only-password".into()),
         sign_mode: "driver".to_string(),
-        digest_algorithm: "sha1".to_string(),
+        digest_algorithm: "sha256".to_string(),
         timestamp_url: None,
         description: None,
         url: None,
-        cross_cert_path: Some(cross_cert.to_string_lossy().to_string()),
+        cross_cert_path: Some(cross_cert_dir.to_string_lossy().to_string()),
         replace_signature: true,
     };
 
@@ -395,7 +388,7 @@ fn test_driver_signing_with_historical_pfx_excludes_self_signed_root() {
         .certificates
         .as_ref()
         .expect("missing certificates");
-    assert_eq!(certs.0.len(), 3, "self-signed root should be excluded");
+    assert_eq!(certs.0.len(), 1, "only the signing leaf should be embedded");
 
     let self_signed_count = certs
         .0
@@ -411,7 +404,7 @@ fn test_driver_signing_with_historical_pfx_excludes_self_signed_root() {
         "embedded root certificate should be excluded"
     );
 
-    let _ = std::fs::remove_file(&signed_pe);
+    let _ = std::fs::remove_dir_all(temp_dir);
 }
 
 #[test]
@@ -957,81 +950,6 @@ fn build_timestamp_response_fixture() -> Vec<u8> {
     }
     .to_der()
     .expect("encode mock timestamp response")
-}
-
-#[test]
-fn test_driver_sign_with_real_pfx_excludes_self_signed_root() {
-    let Some(pfx_path) = historical_driver_pfx() else {
-        return;
-    };
-
-    let test_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("test_data");
-    let pe_file = test_dir.join("test_hello.exe");
-    if !pe_file.exists() {
-        eprintln!("Skipping: test_hello.exe not found");
-        return;
-    }
-
-    let signed_pe = test_dir.join("test_hello_driver_diagnostic.exe");
-    std::fs::copy(&pe_file, &signed_pe).expect("copy PE");
-
-    // Also copy to a temp dir that doesn't have cross-certs, to test bundled fallback
-    let cross_cert_dir = test_dir.join("empty_cross_cert_dir");
-    std::fs::create_dir_all(&cross_cert_dir).expect("create empty dir");
-
-    let request = rustsign_lib::SignRequest {
-        file_path: signed_pe.to_string_lossy().to_string(),
-        cert_id: None,
-        cert_path: Some(pfx_path.to_string_lossy().to_string()),
-        cert_password: None,
-        sign_mode: "driver".to_string(),
-        digest_algorithm: "sha256".to_string(),
-        timestamp_url: None,
-        description: Some("Diagnostic driver sign".to_string()),
-        url: None,
-        cross_cert_path: Some(cross_cert_dir.to_string_lossy().to_string()),
-        replace_signature: true,
-    };
-
-    let result = rustsign_lib::sign_file(&request).expect("sign_file failed");
-    assert!(result.success, "Signing failed: {}", result.message);
-
-    // Verify the signed file can be parsed and has the old driver-signing chain shape:
-    // leaf + issuing intermediate + Microsoft cross-cert, with no self-signed root.
-    let data = std::fs::read(&signed_pe).expect("read signed PE");
-    let entries = rustsign_lib::pe::read_all_signatures(&data).expect("read signatures");
-    assert!(!entries.is_empty(), "Expected at least one signature entry");
-
-    let signed_data = parse_signed_data(&signed_pe);
-    let certs = signed_data
-        .certificates
-        .as_ref()
-        .expect("missing certificates");
-    assert_eq!(
-        certs.0.len(),
-        3,
-        "driver signature should embed leaf + intermediate + cross-cert"
-    );
-
-    let self_signed_count = certs
-        .0
-        .iter()
-        .filter_map(|choice| match choice {
-            cms::cert::CertificateChoices::Certificate(cert) => Some(cert),
-            _ => None,
-        })
-        .filter(|cert| cert.tbs_certificate.subject == cert.tbs_certificate.issuer)
-        .count();
-    assert_eq!(
-        self_signed_count, 0,
-        "driver signature must not embed self-signed roots"
-    );
-
-    let _ = std::fs::remove_file(&signed_pe);
-    let _ = std::fs::remove_dir_all(cross_cert_dir);
 }
 
 /// Regression test for the test-certificate generation fix.

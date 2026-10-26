@@ -117,8 +117,8 @@ pub fn start_local_tsa(config: &LocalTsaConfig) -> Result<LocalTsaStatus, CodeSi
     let entry = cert_manager::get_certificate(cert_id)?
         .ok_or_else(|| CodeSignError::Tsa("Certificate not found".into()))?;
 
-    let cert_password = entry.password.as_deref();
-    let loaded_cert = crypto::load_certificate(&PathBuf::from(entry.file_path), cert_password)
+    let cert_password = cert_manager::password_for_entry(&entry)?;
+    let loaded_cert = crypto::load_certificate(&PathBuf::from(&entry.file_path), cert_password)
         .map_err(|e| CodeSignError::Tsa(format!("Failed to load certificate: {e}")))?;
 
     if config.port == 0 {

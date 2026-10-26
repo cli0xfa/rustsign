@@ -30,16 +30,34 @@ const TIME_STAMPING_EKU: &str = "1.3.6.1.5.5.7.3.8";
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct TestCertResult {
     pub success: bool,
     pub message: String,
     pub root_pem: String,
+    #[serde(skip)]
     pub root_key_pem: String,
     pub sign_pem: String,
+    #[serde(skip)]
     pub sign_key_pem: String,
     pub sign_pfx_path: Option<String>,
     pub output_files: Vec<String>,
+}
+
+impl std::fmt::Debug for TestCertResult {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TestCertResult")
+            .field("success", &self.success)
+            .field("message", &self.message)
+            .field("root_pem", &self.root_pem)
+            .field("root_key_pem", &"[REDACTED]")
+            .field("sign_pem", &self.sign_pem)
+            .field("sign_key_pem", &"[REDACTED]")
+            .field("sign_pfx_path", &self.sign_pfx_path)
+            .field("output_files", &self.output_files)
+            .finish()
+    }
 }
 
 pub fn generate_test_cert_files(
@@ -176,7 +194,7 @@ pub struct GeneratedCert {
     pub pfx_der: Vec<u8>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CertGenOptions {
     /// Common Name for the root CA certificate (default: "RustSign Test Root CA")
     #[serde(default = "default_root_cn")]
@@ -215,6 +233,25 @@ pub struct CertGenOptions {
     /// ID of the issuer CA certificate when is_root_ca is false
     #[serde(default)]
     pub issuer_cert_id: Option<String>,
+}
+
+impl std::fmt::Debug for CertGenOptions {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CertGenOptions")
+            .field("root_cn", &self.root_cn)
+            .field("sign_cn", &self.sign_cn)
+            .field("organization", &self.organization)
+            .field("country", &self.country)
+            .field("include_code_signing_eku", &self.include_code_signing_eku)
+            .field("include_kernel_eku", &self.include_kernel_eku)
+            .field("include_timestamp_eku", &self.include_timestamp_eku)
+            .field("validity_years", &self.validity_years)
+            .field("password", &"[REDACTED]")
+            .field("is_root_ca", &self.is_root_ca)
+            .field("issuer_cert_id", &self.issuer_cert_id)
+            .finish()
+    }
 }
 
 fn default_root_cn() -> String {
@@ -262,7 +299,7 @@ pub fn generate_subordinate_cert(options: &CertGenOptions) -> Result<GeneratedCe
     let issuer_entry = crate::cert_manager::get_certificate(issuer_id)?
         .ok_or_else(|| CodeSignError::Certificate("Issuer CA certificate not found".into()))?;
 
-    let issuer_password = issuer_entry.password.as_deref();
+    let issuer_password = crate::cert_manager::password_for_entry(&issuer_entry)?;
     let issuer_loaded =
         crate::crypto::load_certificate(&PathBuf::from(&issuer_entry.file_path), issuer_password)?;
 
@@ -745,6 +782,35 @@ mod tests {
         assert_eq!(opts.password, "test123");
         assert!(opts.include_code_signing_eku);
         assert!(opts.include_kernel_eku);
+    }
+
+    #[test]
+    fn certificate_generation_results_do_not_serialize_private_keys() {
+        let result = TestCertResult {
+            success: true,
+            message: "generated".into(),
+            root_pem: "public root".into(),
+            root_key_pem: "private root key".into(),
+            sign_pem: "public signer".into(),
+            sign_key_pem: "private signer key".into(),
+            sign_pfx_path: None,
+            output_files: Vec::new(),
+        };
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains("private root key"));
+        assert!(!serialized.contains("private signer key"));
+        assert!(!format!("{result:?}").contains("private root key"));
+        assert!(!format!("{result:?}").contains("private signer key"));
+    }
+
+    #[test]
+    fn certificate_generation_options_debug_redacts_password() {
+        let options = CertGenOptions {
+            password: "generation-secret".into(),
+            ..Default::default()
+        };
+        assert!(!format!("{options:?}").contains("generation-secret"));
     }
 
     #[test]
